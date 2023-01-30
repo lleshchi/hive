@@ -125,7 +125,7 @@ github.com/PaesslerAG/jsonpath
 # github.com/alexkohler/prealloc v1.0.0
 ## explicit; go 1.15
 github.com/alexkohler/prealloc/pkg
-# github.com/aliyun/alibaba-cloud-sdk-go v1.61.1458
+# github.com/aliyun/alibaba-cloud-sdk-go v1.62.141
 ## explicit; go 1.13
 github.com/aliyun/alibaba-cloud-sdk-go/sdk
 github.com/aliyun/alibaba-cloud-sdk-go/sdk/auth
@@ -1079,6 +1079,11 @@ github.com/openshift/machine-api-operator/pkg/util/conditions
 # github.com/openshift/machine-api-provider-gcp v0.0.0
 ## explicit
 github.com/openshift/machine-api-provider-gcp/pkg/apis/gcpprovider/v1beta1
+# github.com/opentracing/opentracing-go v1.2.1-0.20220228012449-10b1cf09e00b
+## explicit; go 1.14
+github.com/opentracing/opentracing-go
+github.com/opentracing/opentracing-go/ext
+github.com/opentracing/opentracing-go/log
 # github.com/ovirt/go-ovirt v0.0.0-20210809163552-d4276e35d3db
 ## explicit; go 1.15
 github.com/ovirt/go-ovirt
@@ -1402,7 +1407,7 @@ go.starlark.net/resolve
 go.starlark.net/starlark
 go.starlark.net/starlarkstruct
 go.starlark.net/syntax
-# go.uber.org/atomic v1.8.0
+# go.uber.org/atomic v1.9.0
 ## explicit; go 1.13
 go.uber.org/atomic
 # go.uber.org/multierr v1.6.0

@@ -90,6 +90,7 @@ type DescribeAccessControlListAttributeResponse struct {
 	RequestId          string           `json:"RequestId" xml:"RequestId"`
 	ResourceGroupId    string           `json:"ResourceGroupId" xml:"ResourceGroupId"`
 	AclName            string           `json:"AclName" xml:"AclName"`
+	CreateTime         string           `json:"CreateTime" xml:"CreateTime"`
 	AclEntrys          AclEntrys        `json:"AclEntrys" xml:"AclEntrys"`
 	RelatedListeners   RelatedListeners `json:"RelatedListeners" xml:"RelatedListeners"`
 }
@@ -99,7 +100,7 @@ func CreateDescribeAccessControlListAttributeRequest() (request *DescribeAccessC
 	request = &DescribeAccessControlListAttributeRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Slb", "2014-05-15", "DescribeAccessControlListAttribute", "Slb", "openAPI")
+	request.InitWithApiInfo("Slb", "2014-05-15", "DescribeAccessControlListAttribute", "slb", "openAPI")
 	request.Method = requests.POST
 	return
 }
