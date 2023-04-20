@@ -350,7 +350,7 @@ func Test_cleanupPreviouslyClaimedClusterDeployments(t *testing.T) {
 			err := c.List(context.Background(), cds)
 			require.NoError(t, err)
 
-			cleanup, err := reconciler.cleanupPreviouslyClaimedClusterDeployments(cds, logger)
+			cleanup, err := reconciler.(cds, logger)
 			if test.expectedErr != "" {
 				assert.Regexp(t, test.expectedErr, err)
 			}
