@@ -37,9 +37,7 @@ func main() {
 func createDecoder() *admission.Decoder {
 	scheme := runtime.NewScheme()
 	hivev1.AddToScheme(scheme)
-	decoder, err := admission.NewDecoder(scheme)
-	if err != nil {
-		log.WithError(err).Fatal("could not create a decoder")
-	}
+	decoder := admission.NewDecoder(scheme)
+	// FIXME check for error?
 	return decoder
 }
