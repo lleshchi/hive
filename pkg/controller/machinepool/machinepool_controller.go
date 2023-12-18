@@ -32,9 +32,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	v1 "github.com/openshift/api/config/v1"
 	machineapi "github.com/openshift/api/machine/v1beta1"
 	autoscalingv1 "github.com/openshift/cluster-autoscaler-operator/pkg/apis/autoscaling/v1"
 	autoscalingv1beta1 "github.com/openshift/cluster-autoscaler-operator/pkg/apis/autoscaling/v1beta1"
+	cpms "github.com/openshift/cluster-control-plane-machine-set-operator/pkg/machineproviders/providers/openshift/machine/v1beta1/providerconfig"
 	installertypes "github.com/openshift/installer/pkg/types"
 	"github.com/openshift/library-go/pkg/operator/resource/resourcemerge"
 
@@ -44,6 +46,7 @@ import (
 	hivemetrics "github.com/openshift/hive/pkg/controller/metrics"
 	controllerutils "github.com/openshift/hive/pkg/controller/utils"
 	"github.com/openshift/hive/pkg/remoteclient"
+	"github.com/openshift/hive/pkg/util/logrus"
 	"github.com/openshift/hive/pkg/util/scheme"
 )
 
@@ -512,24 +515,29 @@ func (r *ReconcileMachinePool) ensureEnoughReplicas(
 	return nil, nil
 }
 
-// matchAndMutate decides whether gMS ("generated MachineSet") and rMS ("remote MachineSet" -- the one already extant
-// on the spoke cluster) are talking about the same machines. In certain edge cases (vsphere) this may be true when
-// the names don't match, in which case this func will mutate gMS to make the names match. HIVE-2254.
-func matchAndMutate(pool *hivev1.MachinePool, cd *hivev1.ClusterDeployment, gMS *machineapi.MachineSet, rMS machineapi.MachineSet) bool {
-	// HACK: For vsphere, the default worker pool may or may not have a `-0` suffix.
-	// - If the cluster was created on 4.12 or earlier, it won't.
-	// - If the cluster was created on 4.13 or later, it will.
-	// - If we are vendoring installer code from 4.12 or earlier, our locally-generated MachineSets won't have the suffix.
-	// - If we are vendoring 4.13+ installer code, they will.
-	// TODO: When we implement support for zonal, we may need to get cleverer than hardcoding "-0".
-	if cd.Spec.Platform.VSphere == nil || pool.Spec.Name != "worker" || !(strings.HasSuffix(rMS.Name, "-worker") || strings.HasSuffix(rMS.Name, "-worker-0")) {
-		// This hack only applies to the default worker pool on vsphere; otherwise the name (mis)match is sufficient.
-		return gMS.Name == rMS.Name
+// matchMachineSets decides whether gMS ("generated MachineSet") and rMS ("remote MachineSet" -- the one already extant
+// on the spoke cluster) are talking about the same machines. In certain cases, this may be true when
+// the names don't match. The function therefore relies on the hive machinePoolNameLabel to determine whether the MachineSets
+// are part of the same MachinePool. If the machinePoolNameLabels match, the function then confirms that the MachineSets belong
+// to the same Availability Zone (aka Failure Domain). This ensures that the MachineSets are referring to the same machines. HIVE-2254.
+func matchMachineSets(gMS *machineapi.MachineSet, rMS machineapi.MachineSet, logger log.FieldLogger) (bool, error) {
+
+	if gMS.Labels[machinePoolNameLabel] != rMS.Labels[machinePoolNameLabel] {
+		return false, nil
 	}
-	// If we get here, we know it's vsphere, and both gMS and rMS are talking about the default worker pool.
-	// Make gMS's name match so we don't end up with a separate MachineSet
-	gMS.Name = rMS.Name
-	return true
+
+	rMS_providerconfig, err := cpms.NewProviderConfigFromMachineSpec(logrus.NewLogr(logger), rMS.Spec.Template.Spec, &v1.Infrastructure{})
+	if err != nil {
+		logger.WithError(err).Errorf("unable to parse remote MachineSet %v provider config", rMS.Name)
+		return false, err
+	}
+	gMS_providerconfig, err := cpms.NewProviderConfigFromMachineSpec(logrus.NewLogr(logger), gMS.Spec.Template.Spec, &v1.Infrastructure{})
+	if err != nil {
+		logger.WithError(err).Error("unable to parse generated MachineSet %v provider config", gMS.Name)
+		return false, err
+	}
+
+	return rMS_providerconfig.ExtractFailureDomain().Equal(gMS_providerconfig.ExtractFailureDomain()), nil
 }
 
 func (r *ReconcileMachinePool) syncMachineSets(
@@ -563,8 +571,12 @@ func (r *ReconcileMachinePool) syncMachineSets(
 	for i, ms := range generatedMachineSets {
 		found := false
 		for _, rMS := range remoteMachineSets.Items {
-			if matchAndMutate(pool, cd, ms, rMS) {
-				found = true
+			found, err := matchMachineSets(ms, rMS, logger)
+			if err != nil {
+				// FIXME if we can't match the machinesets due to error parsing provider config, should we proceed? Best effort?
+				logger.WithError(err).Errorf("unable to match MachineSets %s and %s", ms.Name, rMS.Name)
+			}
+			if found {
 				objectModified := false
 				objectMetaModified := false
 				resourcemerge.EnsureObjectMeta(&objectMetaModified, &rMS.ObjectMeta, ms.ObjectMeta)
