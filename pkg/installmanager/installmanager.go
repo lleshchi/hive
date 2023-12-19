@@ -22,6 +22,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"sigs.k8s.io/yaml"
 
 	corev1 "k8s.io/api/core/v1"
@@ -864,6 +865,58 @@ func (m *InstallManager) generateAssets(cd *hivev1.ClusterDeployment, workerMach
 		}
 	}
 
+	// Day 0: Add MachinePool label to MachineSet manifests
+
+	mapPoolsByType := map[string]string{}
+	mpL := &hivev1.MachinePoolList{}
+	if err := m.DynamicClient.List(context.Background(), mpL, &client.ListOptions{Namespace: m.Namespace}); err != nil {
+		return err
+	}
+	for _, pool := range mpL.Items {
+		if pool.Spec.ClusterDeploymentRef.Name == cd.Name {
+			mapPoolsByType[pool.Spec.Name] = pool.Name
+		}
+	}
+
+	if len(mapPoolsByType) > 0 {
+		// TODO: Handle error arg to WalkDirFunc
+		err = filepath.WalkDir(filepath.Join(m.WorkDir, "openshift"), func(path string, d fs.DirEntry, _ error) error {
+			if d.IsDir() || (filepath.Ext(path) != ".yaml" && filepath.Ext(path) != ".yml") {
+				return nil
+			}
+
+			manifestBytes, err := os.ReadFile(path)
+			if err != nil {
+				m.log.WithError(err).Error("error reading manifest file")
+				return err
+			}
+
+			modifiedManifestBytes, err := patchLabelMachineSetManifest(manifestBytes, mapPoolsByType, m.log)
+			if err != nil {
+				m.log.WithError(err).Error("error patching worker machineset manifest")
+				return err
+			}
+			if modifiedManifestBytes != nil {
+				info, err := d.Info()
+				if err != nil {
+					m.log.WithError(err).Error("error retrieving file info")
+					return err
+				}
+				err = os.WriteFile(path, *modifiedManifestBytes, info.Mode())
+				if err != nil {
+					m.log.WithError(err).Error("error writing manifest")
+					return err
+				}
+			}
+
+			return nil
+		})
+		if err != nil {
+			m.log.WithError(err).Error("error finding machine pool manifests")
+			return err
+		}
+	}
+
 	// Day 0: Configure Hive worker MachinePool manifests with additional security group when
 	// ExtraWorkerSecurityGroupAnnotation has been set in annotations for the worker MachinePool.
 	// For details, see HIVE-1802.
@@ -948,6 +1001,70 @@ func (m *InstallManager) generateAssets(cd *hivev1.ClusterDeployment, workerMach
 
 	m.log.Info("assets generated successfully")
 	return nil
+}
+
+func patchLabelMachineSetManifest(manifestBytes []byte, poolsByType map[string]string, logger log.FieldLogger) (*[]byte, error) {
+	manifestBytesJson, err := yaml.YAMLToJSON(manifestBytes)
+	if err != nil {
+		return nil, errors.Wrap(err, "Error converting yaml to json")
+	}
+
+	if err != nil {
+		return nil, errors.Wrap(err, "Error converting yaml to json")
+	}
+	c, err := yamlutils.Decode(manifestBytes)
+	// Decoding the yaml here shouldn't produce an error. An error indicates that the
+	// installer produced yaml that could not be decoded.
+	if err != nil {
+		logger.WithError(err).Error("unable to decode manifest bytes")
+		return nil, err
+	}
+
+	// Return if file is not a MachineSet manifest
+	if isMachineSet, _ := yamlutils.Test(c, "/kind", "MachineSet"); !isMachineSet {
+		return nil, nil
+	}
+
+	// Match MachineSet to MachinePool name
+	msetType := gjson.Get(string(manifestBytesJson), `spec.template.metadata.labels.machine\.openshift\.io\/cluster-api-machine-type`).String()
+	if msetType == "" {
+		logger.Error("MachineSet does not contain machine.openshift.io/cluster-api-machine-type label")
+		return nil, errors.New("MachineSet does not contain machine.openshift.io/cluster-api-machine-type label")
+	}
+
+	if poolName, exists := poolsByType[msetType]; exists {
+		msetName := gjson.Get(string(manifestBytesJson), `spec.template.metadata.labels.machine\.openshift\.io\/cluster-api-machineset`).String()
+		if msetName == "" {
+			logger.WithError(err).Error("MachineSet does not contain machine.openshift.io/cluster-api-machineset label")
+			return nil, errors.New("MachineSet does not contain machine.openshift.io/cluster-api-machineset label")
+		}
+		logger.Infof("Matching machineset %s of type %s with pool %s", msetName, msetType, poolName)
+
+		// FIXME do we need hive.openshift.io/managed label here or is it already set?
+		manifestBytesJson, err = sjson.SetBytes(manifestBytesJson, `metadata.labels.hive\.openshift\.io/managed`, "true")
+		if err != nil {
+			logger.WithError(err).Error("error applying hive managed label patch")
+			return nil, err
+		}
+
+		manifestBytesJson, err = sjson.SetBytes(manifestBytesJson, `metadata.labels.hive\.openshift\.io/machine-pool-name`, poolName)
+		if err != nil {
+			logger.WithError(err).Error("error applying machine pool label patch")
+			return nil, err
+		}
+
+		// Convert back to yaml
+		modifiedBytes, err := yaml.JSONToYAML(manifestBytesJson)
+		if err != nil {
+			logger.WithError(err).Error("error converting json to yaml")
+			return nil, err
+		}
+
+		return &modifiedBytes, nil
+	}
+
+	return nil, nil
+
 }
 
 // patchWorkerMachineSetManifest accepts a yaml manifest as []byte and patches the manifest to include an additional
