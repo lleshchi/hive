@@ -279,6 +279,8 @@ func TestAutoscalingMachinePool(t *testing.T) {
 			time.Sleep(10 * time.Second)
 		case err != nil:
 			t.Fatalf("could not get the cluster autoscaler: %v", err)
+		default:
+			break
 		}
 	}
 	if clusterAutoscaler.Name == "" {
