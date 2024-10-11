@@ -9,9 +9,9 @@ import (
 	"sort"
 	"strings"
 
-	yamlpatch "github.com/krishicks/yaml-patch"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 
 	"github.com/davegardnerisme/deephash"
@@ -836,22 +836,21 @@ func (r *ReconcileClusterPool) patchInstallConfig(clp *hivev1.ClusterPool, cd *h
 		return err
 	}
 
-	newPatch := yamlpatch.Patch{}
+	installConfig := []byte(secret.StringData["install-config.yaml"])
 	for _, patch := range cdc.Spec.InstallConfigPatches {
-		var value interface{} = patch.Value
-		newPatch = append(newPatch, yamlpatch.Operation{
-			Op:    yamlpatch.Op(patch.Op),
-			Path:  yamlpatch.OpPath(patch.Path),
-			From:  yamlpatch.OpPath(patch.From),
-			Value: yamlpatch.NewNode(&value),
-		})
-	}
-
-	installConfig, err := newPatch.Apply([]byte(secret.StringData["install-config.yaml"]))
-	if err != nil {
-		cdcs.BrokenBySyntax(r, cdc, fmt.Sprint(err))
-		cdcs.UpdateInventoryValidCondition(r, clp)
-		return err
+		patchJSON := []byte(fmt.Sprintf(`{"op": "%s", "path": %s, "from": %s, "value": %s}`, patch.Op, patch.Path, patch.From, json.RawMessage(patch.Value)))
+		ops, err := jsonpatch.DecodePatch(patchJSON)
+		if err != nil {
+			// FIXME error handling correct?
+			return errors.Wrap(err, "error decoding json while applying ClusterDeploymentCustomization and its reservation")
+		}
+		modifiedBytes, err := ops.Apply(installConfig)
+		if err != nil {
+			cdcs.BrokenBySyntax(r, cdc, fmt.Sprint(err))
+			cdcs.UpdateInventoryValidCondition(r, clp)
+			return err // FIXME error handling correct?
+		}
+		installConfig = modifiedBytes
 	}
 
 	configJson, err := json.Marshal(cdc.Spec)

@@ -17,12 +17,12 @@ import (
 	"strings"
 	"time"
 
-	yamlpatch "github.com/krishicks/yaml-patch"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	"sigs.k8s.io/yaml"
 
 	corev1 "k8s.io/api/core/v1"
@@ -977,20 +977,6 @@ func patchLabelMachineSetManifest(manifestBytes []byte, poolsByType map[string]*
 	if err != nil {
 		return nil, errors.Wrap(err, "Error converting yaml to json")
 	}
-	/*
-		c, err := yamlutils.Decode(manifestBytes)
-		// Decoding the yaml here shouldn't produce an error. An error indicates that the
-		// installer produced yaml that could not be decoded.
-		if err != nil {
-			logger.WithError(err).Error("unable to decode manifest bytes")
-			return nil, err
-		}
-
-		// Return if file is not a MachineSet manifest
-		if isMachineSet, _ := yamlutils.Test(c, "/kind", "MachineSet"); !isMachineSet {
-			return nil, nil
-		}
-	*/
 
 	// Return if file is not a MachineSet manifest
 	if kind := gjson.Get(string(manifestBytesJson), `kind`).String(); kind != "MachineSet" {
@@ -1071,28 +1057,29 @@ func patchWorkerMachineSetManifest(manifestBytes []byte, pool *hivev1.MachinePoo
 		"values": []string{vpcID},
 	}
 	vpcIDFilterValueInterface := interface{}(vpcIDFilterValue)
-	ops := func(idx int) yamlpatch.Patch {
-		return yamlpatch.Patch{
-			// Add the security group name obtained from the ExtraWorkerSecurityGroupAnnotation
-			// annotation found on the MachinePool to the existing tag:Name filter in the worker
-			// MachineSet manifest
-			yamlpatch.Operation{
-				Op:    "add",
-				Path:  yamlpatch.OpPath(fmt.Sprintf("/spec/template/spec/providerSpec/value/securityGroups/%d/filters/0/values/-", idx)),
-				Value: yamlpatch.NewNode(&securityGroupFilterValue),
-			},
-			// Add a filter for the vpcID since the names of security groups may be the same within a
-			// given AWS account. HIVE-1874
-			yamlpatch.Operation{
-				Op:    "add",
-				Path:  yamlpatch.OpPath(fmt.Sprintf("/spec/template/spec/providerSpec/value/securityGroups/%d/filters/-", idx)),
-				Value: yamlpatch.NewNode(&vpcIDFilterValueInterface),
-			},
-		}
+	ops := func(idx int) (jsonpatch.Patch, error) {
+
+		// Add the security group name obtained from the ExtraWorkerSecurityGroupAnnotation
+		// annotation found on the MachinePool to the existing tag:Name filter in the worker
+		// MachineSet manifest
+		// FIXME correct path and value types?
+		patchJSON := []byte(fmt.Sprintf(`[
+			{"op": "add", "path": %s, "value": %s},
+			{"op": "add", "path": %s, "value": %s}]`,
+			fmt.Sprintf("/spec/template/spec/providerSpec/value/securityGroups/%d/filters/0/values/-", idx),
+			&securityGroupFilterValue,
+			fmt.Sprintf("/spec/template/spec/providerSpec/value/securityGroups/%d/filters/-", idx),
+			&vpcIDFilterValueInterface))
+		return jsonpatch.DecodePatch(patchJSON)
 	}
 
 	// Apply patch to manifest
-	modifiedBytes, err := ops(0).Apply(manifestBytes)
+	patch, err := ops(0)
+	if err != nil {
+		logger.WithError(err).Error("error decoding patch")
+		return nil, err
+	}
+	modifiedBytes, err := patch.Apply(manifestBytes)
 	if err != nil {
 		logger.WithError(err).Error("error applying patch")
 		return nil, err
@@ -1111,9 +1098,14 @@ func patchWorkerMachineSetManifest(manifestBytes []byte, pool *hivev1.MachinePoo
 	// *other than* the one resulting from a given entry not existing. So we have to scrape and match
 	// that error specifically.
 	for i := 1; i <= 2; i++ {
-		modB, err := ops(i).Apply(modifiedBytes)
+		patch, err := ops(i)
 		if err != nil {
-			if strings.Contains(err.Error(), fmt.Sprintf("yamlpatch add operation does not apply: doc is missing path: /spec/template/spec/providerSpec/value/securityGroups/%d/filters/0/values/-", i)) {
+			logger.WithError(err).Error("error decoding patch")
+			return nil, err
+		}
+		modB, err := patch.Apply(modifiedBytes)
+		if err != nil {
+			if strings.Contains(err.Error(), fmt.Sprintf("operation does not apply: doc is missing path: /spec/template/spec/providerSpec/value/securityGroups/%d/filters/0/values/-", i)) {
 				logger.Infof("Stopping after patching %d security groups", i)
 				return modifiedBytes, nil
 			}
@@ -2021,26 +2013,28 @@ func patchAzureOverrideCreds(overrideCredsBytes, clusterInfraConfigBytes []byte,
 		return nil, fmt.Errorf("error reading from manifests, region=%s, clusterInfraConfig=%s", region, string(clusterInfraConfigJson))
 	}
 
-	regionBase64 := interface{}(base64.StdEncoding.EncodeToString([]byte(region)))
-	infraNameBase64 := interface{}(base64.StdEncoding.EncodeToString([]byte(infraName)))
-	resourceGroupNameBase64 := interface{}(base64.StdEncoding.EncodeToString([]byte(resourceGroupName)))
+	regionBase64 := base64.StdEncoding.EncodeToString([]byte(region))
+	infraNameBase64 := base64.StdEncoding.EncodeToString([]byte(infraName))
+	resourceGroupNameBase64 := base64.StdEncoding.EncodeToString([]byte(resourceGroupName))
 
-	ops := yamlpatch.Patch{
-		yamlpatch.Operation{
-			Op:    "add", //ok even if /data/azure_region already exists
-			Path:  yamlpatch.OpPath("/data/azure_region"),
-			Value: yamlpatch.NewNode(&regionBase64),
-		},
-		yamlpatch.Operation{
-			Op:    "add",
-			Path:  yamlpatch.OpPath("/data/azure_resource_prefix"),
-			Value: yamlpatch.NewNode(&infraNameBase64),
-		},
-		yamlpatch.Operation{
-			Op:    "add",
-			Path:  yamlpatch.OpPath("/data/azure_resourcegroup"),
-			Value: yamlpatch.NewNode(&resourceGroupNameBase64),
-		},
+	// FIXME confirm path and value types
+	patchJSON := []byte(fmt.Sprintf(
+		`[
+		{"op": "add", "path": %s, "value": %s}
+		{"op": "add", "path": %s, "value": %s}
+		{"op": "add", "path": %s, "value": %s}
+		]`,
+		"/data/azure_region",
+		regionBase64,
+		"/data/azure_resource_prefix",
+		infraNameBase64,
+		"/data/azure_resourcegroup",
+		resourceGroupNameBase64,
+	))
+
+	ops, err := jsonpatch.DecodePatch(patchJSON)
+	if err != nil {
+		return nil, errors.Wrap(err, "error decoding json for azure override creds")
 	}
 
 	// Apply patch to 99_cloud-creds-secret.yaml
